@@ -21,6 +21,7 @@
     --accent: #0f6b5c;
     --accent-text: #ffffff;
     --danger: #a33a2a;
+    --model-bg: #dfe3e1;
     color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
@@ -34,6 +35,7 @@
       --accent: #4cc2ab;
       --accent-text: #08201b;
       --danger: #f0917f;
+      --model-bg: #2a2f2c;
       color-scheme: dark;
     }
   }
@@ -186,7 +188,7 @@
     border: 1px solid var(--line); border-radius: 8px; touch-action: none; cursor: grab;
   }
   .stagebox.white { background: #fff; }
-  .stagebox.plain { background: var(--surface); }
+  .stagebox.model { background: var(--model-bg); }
   .stagebox img { display: block; width: 100%; height: 100%; padding: 12px; object-fit: contain; transform-origin: 0 0; user-select: none; pointer-events: none; }
   .stagebox canvas { display: block; outline: none; }
   .stage-tools { position: absolute; top: 8px; right: 8px; display: flex; gap: 4px; }
@@ -249,7 +251,7 @@
           <dt>Tablo</dt><dd>XLSX, XLS, ODS, CSV, TSV</dd>
           <dt>Arşiv</dt><dd>ZIP, RAR, 7Z, TAR, TGZ, GZ, TAR.BZ2, TAR.XZ</dd>
           <dt>E-posta</dt><dd>EML, MSG</dd>
-          <dt>Çizim ve 3D</dt><dd>DXF, STL, OBJ, GLB, glTF</dd>
+          <dt>Çizim ve 3D</dt><dd>DXF, STL, OBJ, GLB, glTF, FBX, 3DS, 3DM, STEP, IGES, SKP, BLEND (yalnızca önizleme resmi)</dd>
           <dt>Veri</dt><dd>SQLite, JSON</dd>
           <dt>Harita</dt><dd>GPX, KML, GeoJSON</dd>
           <dt>Yazı tipi</dt><dd>TTF, OTF, WOFF, WOFF2</dd>
@@ -297,7 +299,11 @@ const LIBS = {
   leaflet: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js',
   togeojson: 'https://cdn.jsdelivr.net/npm/@tmcw/togeojson@7.1.3/dist/togeojson.umd.js',
   hljs: 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js',
+  fzstd: 'https://cdn.jsdelivr.net/npm/fzstd@0.1.1/umd/index.js',
 };
+const OCCT_BASE = 'https://cdn.jsdelivr.net/npm/occt-import-js@0.0.23/dist/';
+const RHINO_BASE = 'https://cdn.jsdelivr.net/npm/rhino3dm@8.32.1/';
+const OPENSKP_URL = 'https://cdn.jsdelivr.net/npm/openskp@1.5.0/+esm';
 const SQLJS_BASE = 'https://cdn.jsdelivr.net/npm/sql.js@1.15.2/dist/';
 const THREE_BASE = 'https://cdn.jsdelivr.net/npm/three@0.187.0/';
 const HLJS_BASE = 'https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/';
@@ -317,7 +323,7 @@ const AUDIO = 'mp3 wav ogg oga m4a aac flac opus wma amr'.split(' ');
 const SHEET = 'xlsx xlsm xlsb xls ods'.split(' ');
 const ARCHIVE = 'rar 7z tar tgz tbz tbz2 txz'.split(' ');
 const HEIF_BRANDS = 'heic heix hevc hevx heim heis mif1 msf1'.split(' ');
-const MODEL = 'stl glb gltf'.split(' ');
+const MODEL = 'stl glb gltf fbx 3ds 3dm stp step igs iges skp'.split(' ');
 const FONT = 'ttf otf woff woff2 ttc'.split(' ');
 const MAP = 'geojson gpx kml'.split(' ');
 // Dosya uzantısı (veya adı) -> kod renklendirme dili
@@ -469,6 +475,7 @@ function errorText(err) {
   if (err instanceof LibError) return err.message || 'Bu dosya türünü açmak için internet bağlantısı gerekiyor. Bağlantını kontrol edip yeniden dene.';
   if (err && err.name === 'PasswordException') return 'Bu PDF şifreli olduğu için açılamadı.';
   if (err && err.message === 'encrypted') return 'Bu arşiv şifreli olduğu için açılamadı.';
+  if (err && err.message === 'model') return 'Bu dosyada gösterilecek bir 3D model bulunamadı.';
   if (err && err.message === 'media') return 'Bu tarayıcı dosyanın biçimini desteklemiyor. Başka bir tarayıcıda veya uygun bir uygulamada açmayı dene.';
   return 'Dosya okunamadı. Bozuk veya şifreli olabilir.';
 }
@@ -487,6 +494,7 @@ async function render(file, box, status) {
   // Bu türlerin MIME değeri image/ veya video/ olabildiği için önce bunlara bakılır.
   if (ext === 'psd' || ext === 'psb' || sig4 === '8BPS') return renderPsd(file, box);
   if (ext === 'dxf') return renderDxf(file, box);
+  if (/^blend\d*$/.test(ext) || magic === 'BLEND') return renderBlend(file, box);
   if (MODEL.includes(ext) || sig4 === 'glTF' || (ext === 'obj' && !looksBinary(bytes))) return renderModel(file, box);
   if (ext === 'eml') return renderEml(file, box);
   if (ext === 'msg') return renderMsg(file, box);
@@ -765,10 +773,81 @@ async function loadThree() {
   }
   return three;
 }
+const MODEL_COLOR = 0xb8c4bf;
+async function importAddon(url) {
+  try { return await import(url); } catch (e) { throw new LibError(); }
+}
+// STEP ve IGES ağır işlem: sayfa donmasın diye arka plan işçisinde çözülür.
+function readCad(buffer, ext) {
+  const source = 'importScripts(' + JSON.stringify(OCCT_BASE + 'occt-import-js.js') + ');'
+    + 'onmessage = async (e) => {'
+    + '  try {'
+    + '    const occt = await occtimportjs({ locateFile: (name) => ' + JSON.stringify(OCCT_BASE) + ' + name });'
+    + '    const bytes = new Uint8Array(e.data.buffer);'
+    + '    postMessage(e.data.iges ? occt.ReadIgesFile(bytes, null) : occt.ReadStepFile(bytes, null));'
+    + '  } catch (err) { postMessage({ success: false }); }'
+    + '};';
+  const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+  const worker = new Worker(url);
+  URL.revokeObjectURL(url);
+  cleanups.push(() => worker.terminate());
+  return new Promise((resolve, reject) => {
+    worker.onmessage = (e) => { worker.terminate(); resolve(e.data); };
+    worker.onerror = () => { worker.terminate(); reject(new LibError()); };
+    worker.postMessage({ buffer, iges: ext === 'igs' || ext === 'iges' }, [buffer]);
+  });
+}
+function cadToObject(THREE, result) {
+  if (!result.success) throw new Error('cad');
+  const group = new THREE.Group();
+  for (const mesh of result.meshes) {
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(mesh.attributes.position.array, 3));
+    if (mesh.attributes.normal) geometry.setAttribute('normal', new THREE.Float32BufferAttribute(mesh.attributes.normal.array, 3));
+    else geometry.computeVertexNormals();
+    geometry.setIndex(new THREE.BufferAttribute(new Uint32Array(mesh.index.array), 1));
+    const paint = new THREE.MeshStandardMaterial({ color: MODEL_COLOR, metalness: 0.1, roughness: 0.65 });
+    if (mesh.color) paint.color.setRGB(mesh.color[0], mesh.color[1], mesh.color[2]);
+    group.add(new THREE.Mesh(geometry, paint));
+  }
+  return group;
+}
 async function parseModel(t, file) {
   const { THREE } = t;
   const ext = extOf(file.name);
-  const material = () => new THREE.MeshStandardMaterial({ color: 0xb8c4bf, metalness: 0.1, roughness: 0.65 });
+  const material = () => new THREE.MeshStandardMaterial({ color: MODEL_COLOR, metalness: 0.1, roughness: 0.65 });
+  if (ext === 'stp' || ext === 'step' || ext === 'igs' || ext === 'iges') {
+    return cadToObject(THREE, await readCad(await file.arrayBuffer(), ext));
+  }
+  // Tek dosya verildiği için ayrı duran dokular yüklenemez: dışarı bağlanmak yerine beyaz doku kullanılır.
+  const blank = el('canvas', { width: 1, height: 1 });
+  const pen = blank.getContext('2d');
+  pen.fillStyle = '#fff';
+  pen.fillRect(0, 0, 1, 1);
+  const whitePixel = blank.toDataURL('image/png');
+  const textureManager = new THREE.LoadingManager();
+  textureManager.setURLModifier((url) => (/^(data|blob):/.test(url) ? url : whitePixel));
+  if (ext === 'fbx') {
+    const { FBXLoader } = await importAddon('three/addons/loaders/FBXLoader.js');
+    return new FBXLoader(textureManager).parse(await file.arrayBuffer(), '');
+  }
+  if (ext === '3ds') {
+    const { TDSLoader } = await importAddon('three/addons/loaders/TDSLoader.js');
+    return new TDSLoader(textureManager).parse(await file.arrayBuffer(), '');
+  }
+  if (ext === '3dm') {
+    const { Rhino3dmLoader } = await importAddon('three/addons/loaders/3DMLoader.js');
+    // Bu yükleyici kendi kitaplığını da yöneticiden indiriyor, bu yüzden textureManager verilmez.
+    const loader = new Rhino3dmLoader().setLibraryPath(RHINO_BASE);
+    cleanups.push(() => loader.dispose());
+    const buffer = await file.arrayBuffer();
+    // Bozuk dosyada yükleyici bazen hiç sonuçlanmıyor; dosya boyutuna göre süre tanınır.
+    const limit = 60000 + file.size / 1024;
+    return Promise.race([
+      new Promise((resolve, reject) => loader.parse(buffer, resolve, (e) => reject(e instanceof Error ? e : new Error('3dm')))),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('3dm')), limit)),
+    ]);
+  }
   if (ext === 'stl') {
     const geometry = new t.STLLoader().parse(await file.arrayBuffer());
     return new THREE.Mesh(geometry, material());
@@ -788,23 +867,106 @@ async function parseModel(t, file) {
   const draco = new t.DRACOLoader().setDecoderPath(THREE_BASE + 'examples/jsm/libs/draco/gltf/');
   cleanups.push(() => draco.dispose());
   const loader = new t.GLTFLoader(manager).setDRACOLoader(draco).setMeshoptDecoder(t.MeshoptDecoder);
-  const source = ext === 'gltf' ? decodeText(await file.arrayBuffer()) : await file.arrayBuffer();
+  let source;
+  if (ext === 'skp') {
+    const { buildScene, toGLB } = await importAddon(OPENSKP_URL);
+    const glb = toGLB(buildScene(await file.arrayBuffer()), { textures: true });
+    source = glb.buffer.slice(glb.byteOffset, glb.byteOffset + glb.byteLength);
+  } else {
+    source = ext === 'gltf' ? decodeText(await file.arrayBuffer()) : await file.arrayBuffer();
+  }
   return (await loader.parseAsync(source, '')).scene;
+}
+// Blender'ın kendi biçimi tarayıcıda okunamıyor; dosyadaki küçük resim gösterilir.
+async function readBlendBytes(file) {
+  const head = new Uint8Array(await file.slice(0, 4).arrayBuffer());
+  if (head[0] === 0x1F && head[1] === 0x8B) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('blend');
+    return new Response(file.stream().pipeThrough(new DecompressionStream('gzip'))).arrayBuffer();
+  }
+  if (head[0] === 0x28 && head[1] === 0xB5 && head[2] === 0x2F && head[3] === 0xFD) {
+    await loadLib('fzstd');
+    const out = fzstd.decompress(new Uint8Array(await file.arrayBuffer()));
+    return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+  }
+  return file.arrayBuffer();
+}
+function findBlendPreview(buffer) {
+  const view = new DataView(buffer);
+  const text = (at, length) => String.fromCharCode(...new Uint8Array(buffer, at, length));
+  if (buffer.byteLength < 12 || text(0, 7) !== 'BLENDER') throw new Error('blend');
+  // Blender 5 ile başlık uzadı ve blok başlıkları büyüdü.
+  const modern = /^\d\d-\d\d[vV]\d{4}/.test(text(7, 10));
+  const headerSize = modern ? 17 : 12;
+  const pointer = !modern && text(7, 1) === '_' ? 4 : 8;
+  const little = (modern ? text(12, 1) : text(8, 1)) === 'v';
+  const version = modern ? text(13, 4) : text(9, 3);
+  const blockHead = modern ? 32 : 16 + pointer;
+  let at = headerSize;
+  while (at + blockHead <= buffer.byteLength) {
+    const code = text(at, 4);
+    const size = modern ? Number(view.getBigInt64(at + 16, little)) : view.getInt32(at + 4, little);
+    if (size < 0 || at + blockHead + size > buffer.byteLength) break;
+    if (code === 'TEST' && size >= 8) {
+      const start = at + blockHead;
+      const width = view.getInt32(start, little);
+      const height = view.getInt32(start + 4, little);
+      if (width <= 0 || height <= 0 || width * height * 4 + 8 > size) return { version };
+      return { version, width, height, pixels: new Uint8ClampedArray(buffer.slice(start + 8, start + 8 + width * height * 4)) };
+    }
+    if (code.startsWith('ENDB')) break;
+    at += blockHead + size;
+  }
+  return { version };
+}
+async function renderBlend(file, box) {
+  const found = findBlendPreview(await readBlendBytes(file));
+  const major = found.version.length === 4 ? Number(found.version.slice(0, 2)) : Number(found.version[0]);
+  const minor = found.version.length === 4 ? Number(found.version.slice(2)) : Number(found.version.slice(1));
+  setMeta('Blender ' + major + '.' + minor);
+  const advice = '3D modeli görmek için Blender\'dan GLB veya FBX olarak dışa aktarıp onu aç.';
+  if (!found.pixels) {
+    box.append(el('section', { className: 'paper unknown' },
+      el('h2', { textContent: 'Bu dosyada önizleme resmi yok' }),
+      el('p', { textContent: 'Blender dosyaları burada 3D olarak açılamıyor. ' + advice })));
+    return;
+  }
+  const { width, height, pixels } = found;
+  const flipped = new Uint8ClampedArray(pixels.length);
+  for (let y = 0; y < height; y++) flipped.set(pixels.subarray((height - 1 - y) * width * 4, (height - y) * width * 4), y * width * 4);
+  const canvas = el('canvas', { width, height });
+  canvas.getContext('2d').putImageData(new ImageData(flipped, width, height), 0, 0);
+  box.append(el('div', { className: 'note', textContent: 'Yalnızca dosyanın küçük önizleme resmi gösteriliyor. ' + advice }));
+  await showImage(await canvasToBlob(canvas), box, file.name);
+  setMeta('Blender ' + major + '.' + minor);
 }
 async function renderModel(file, box) {
   const t = await loadThree();
   const { THREE } = t;
   const object = await parseModel(t, file);
   let triangles = 0;
+  let lines = 0;
+  const paints = [];
+  const keepSides = /^(glb|gltf)$/.test(extOf(file.name));
   object.traverse((node) => {
+    if (node.isLine) lines++;
     if (!node.isMesh) return;
     const g = node.geometry;
     triangles += (g.index ? g.index.count : g.attributes.position.count) / 3;
+    paints.push(...[].concat(node.material));
   });
-  if (!triangles) throw new Error('model');
-  setMeta(Math.round(triangles).toLocaleString('tr-TR') + ' üçgen');
+  if (!triangles && !lines) throw new Error('model');
+  setMeta(triangles
+    ? Math.round(triangles).toLocaleString('tr-TR') + ' üçgen'
+    : lines.toLocaleString('tr-TR') + ' eğri');
+  // Dokusu dosyanın dışında kalan modeller simsiyah görünmesin.
+  const allDark = paints.length && paints.every((m) => m.color && m.color.r + m.color.g + m.color.b < 0.06);
+  for (const paint of paints) {
+    if (allDark) paint.color.set(MODEL_COLOR);
+    if (!keepSides) paint.side = THREE.DoubleSide;   // CAD yüzeylerinin arkası da görünsün
+  }
 
-  const view = el('div', { className: 'stagebox plain' });
+  const view = el('div', { className: 'stagebox model' });
   box.append(view);
   let renderer;
   try {
@@ -825,6 +987,12 @@ async function renderModel(file, box) {
   const size = bounds.getSize(new THREE.Vector3()).length() || 1;
   const middle = bounds.getCenter(new THREE.Vector3());
   const camera = new THREE.PerspectiveCamera(45, 1, size / 1000, size * 100);
+  // Kameraya bağlı ışık: model nereye döndürülürse döndürülsün gören yüz aydınlık kalır.
+  const lamp = new THREE.DirectionalLight(0xffffff, 0.8);
+  lamp.position.set(1, 1, 2);
+  lamp.target.position.set(0, 0, -1);
+  camera.add(lamp, lamp.target);
+  scene.add(camera);
   const controls = new t.OrbitControls(camera, renderer.domElement);
   const reset = () => {
     camera.position.copy(middle).add(new THREE.Vector3(0.7, 0.5, 1).normalize().multiplyScalar(size * 1.4));
@@ -855,7 +1023,7 @@ async function renderModel(file, box) {
     observer.disconnect();
     controls.dispose();
     object.traverse((node) => {
-      if (!node.isMesh) return;
+      if (!node.isMesh && !node.isLine) return;
       node.geometry.dispose();
       [].concat(node.material).forEach((m) => m.dispose());
     });
