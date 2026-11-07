@@ -155,6 +155,17 @@
   .unknown p { margin: 0 0 16px; color: var(--muted); }
   .unknown pre { margin: 0; overflow-x: auto; font: 12px/1.5 ui-monospace, Consolas, Menlo, monospace; color: var(--muted); }
 
+  /* RTF ve ODT kendi renklerini taşıyabilir; koyu temada da okunsun diye hep açık zemin. */
+  .paper.light { background: #fff; color: #1f2421; color-scheme: light; }
+  .paper.light a { color: #0f6b5c; }
+
+  .epub { height: calc(100dvh - 170px); min-height: 320px; background: #fff; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+  .epub-nav { display: flex; gap: 8px; margin-top: 8px; }
+  .epub-nav select {
+    flex: 1 1 0; min-width: 0; min-height: 44px; padding: 0 8px;
+    background: var(--surface); color: var(--text); border: 1px solid var(--line); border-radius: 8px; font: inherit;
+  }
+
   iframe.page { display: block; width: 100%; height: calc(100dvh - 110px); border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 </style>
 </head>
@@ -196,19 +207,27 @@ const LIBS = {
   jszip: 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js',
   marked: 'https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js',
   purify: 'https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js',
+  heic: 'https://cdn.jsdelivr.net/npm/heic-to@1.6.7/dist/iife/heic-to.js',
+  epub: 'https://cdn.jsdelivr.net/npm/epubjs@0.3.93/dist/epub.min.js',
+  emf: 'https://cdn.jsdelivr.net/npm/rtf.js@3.0.9/dist/EMFJS.bundle.min.js',
+  wmf: 'https://cdn.jsdelivr.net/npm/rtf.js@3.0.9/dist/WMFJS.bundle.min.js',
+  rtf: 'https://cdn.jsdelivr.net/npm/rtf.js@3.0.9/dist/RTFJS.bundle.min.js',
 };
 const MAX_TEXT_BYTES = 5 * 1024 * 1024;
+const MAX_GUNZIP_BYTES = 512 * 1024 * 1024;
 const MAX_ROWS = 5000;
 
 const IMAGE = 'png jpg jpeg jfif gif webp bmp ico avif svg heic heif tif tiff'.split(' ');
 const VIDEO = 'mp4 m4v webm mov ogv mkv avi 3gp'.split(' ');
 const AUDIO = 'mp3 wav ogg oga m4a aac flac opus wma amr'.split(' ');
 const SHEET = 'xlsx xlsm xlsb xls ods'.split(' ');
+const ARCHIVE = 'rar 7z tar tgz tbz tbz2 txz'.split(' ');
+const HEIF_BRANDS = 'heic heix hevc hevx heim heis mif1 msf1'.split(' ');
 const HINTS = {
   doc: 'Eski .doc biçimi burada açılamıyor. Word ile .docx olarak kaydedip yeniden dene.',
   ppt: 'Eski .ppt biçimi burada açılamıyor. PowerPoint ile .pptx olarak kaydedip yeniden dene.',
-  rar: 'RAR arşivleri burada açılamıyor. ZIP arşivleri açılabiliyor.',
-  '7z': '7z arşivleri burada açılamıyor. ZIP arşivleri açılabiliyor.',
+  bz2: 'Tek dosyalık .bz2 arşivleri burada açılamıyor. .tar.bz2, ZIP, RAR ve 7z arşivleri açılabiliyor.',
+  xz: 'Tek dosyalık .xz arşivleri burada açılamıyor. .tar.xz, ZIP, RAR ve 7z arşivleri açılabiliyor.',
 };
 
 const $ = (id) => document.getElementById(id);
@@ -336,8 +355,9 @@ async function show(file) {
   }
 }
 function errorText(err) {
-  if (err instanceof LibError) return 'Bu dosya türünü açmak için internet bağlantısı gerekiyor. Bağlantını kontrol edip yeniden dene.';
+  if (err instanceof LibError) return err.message || 'Bu dosya türünü açmak için internet bağlantısı gerekiyor. Bağlantını kontrol edip yeniden dene.';
   if (err && err.name === 'PasswordException') return 'Bu PDF şifreli olduğu için açılamadı.';
+  if (err && err.message === 'encrypted') return 'Bu arşiv şifreli olduğu için açılamadı.';
   if (err && err.message === 'media') return 'Bu tarayıcı dosyanın biçimini desteklemiyor. Başka bir tarayıcıda veya uygun bir uygulamada açmayı dene.';
   return 'Dosya okunamadı. Bozuk veya şifreli olabilir.';
 }
@@ -347,12 +367,14 @@ async function render(file, box, status) {
   const type = file.type || '';
 
   if (file.size === 0) { status.textContent = 'Bu dosya boş.'; return keepStatus(box, status); }
-  if (IMAGE.includes(ext) || type.startsWith('image/')) return renderImage(file, box);
+  if (IMAGE.includes(ext) || type.startsWith('image/')) return renderImage(file, box, status);
   if (VIDEO.includes(ext) || type.startsWith('video/')) return renderMedia(file, box, 'video');
   if (AUDIO.includes(ext) || type.startsWith('audio/')) return renderMedia(file, box, 'audio');
   if (ext === 'docx') return renderDocx(file, box);
   if (SHEET.includes(ext)) return renderWorkbook(file, box);
   if (ext === 'pptx') return renderPptx(file, box);
+  if (ext === 'epub') return renderEpub(file, box);
+  if (ext === 'odt') return renderOdt(file, box);
   if (ext === 'csv' || ext === 'tsv') return renderCsv(file, box);
   if (ext === 'md' || ext === 'markdown') return renderMarkdown(file, box);
   if (ext === 'html' || ext === 'htm') return renderHtml(file, box);
@@ -362,6 +384,12 @@ async function render(file, box, status) {
   const magic = String.fromCharCode(...bytes.subarray(0, 5));
   if (ext === 'pdf' || magic === '%PDF-') return renderPdf(file, box);
   if (ext === 'zip' || magic.startsWith('PK\x03\x04')) return renderZip(file, box);
+  if (ext === 'rtf' || magic === '{\\rtf') return renderRtf(file, box);
+  if (isHeifBytes(bytes)) return renderImage(file, box, status);
+  // Adı .tar.gz / .tgz olanlar da gz'dir, ama onları libarchive tek seferde açar.
+  const isTarName = /\.tar\.[^.]+$/i.test(file.name) || ARCHIVE.includes(ext);
+  if (!isTarName && (ext === 'gz' || (bytes[0] === 0x1F && bytes[1] === 0x8B))) return renderGzip(file, box, status);
+  if (isTarName || hasArchiveMagic(bytes)) return renderArchive(file, box);
   if (ext === 'json' && !looksBinary(bytes)) return renderJson(file, box);
   if (!looksBinary(bytes)) return renderText(file, box);
   return showUnknown(file, box, HINTS[ext]);
@@ -372,9 +400,34 @@ function keepStatus(box, status) {
 }
 
 /* ---------- görüntüleyiciler ---------- */
-function renderImage(file, box) {
+function isHeifBytes(bytes) {
+  if (bytes.length < 12) return false;
+  const text = String.fromCharCode(...bytes.subarray(4, 12));
+  return text.startsWith('ftyp') && HEIF_BRANDS.includes(text.slice(4));
+}
+function hasArchiveMagic(b) {
+  const at = (sig, offset = 0) => sig.every((v, i) => b[offset + i] === v);
+  return at([0x52, 0x61, 0x72, 0x21])                 // RAR
+    || at([0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C])       // 7z
+    || at([0x75, 0x73, 0x74, 0x61, 0x72], 257);       // tar
+}
+async function renderImage(file, box, status) {
+  try {
+    await showImage(file, box);
+  } catch (err) {
+    // Safari HEIC'i kendisi açar; açamayan tarayıcılarda JPEG'e çevirip gösteriyoruz.
+    const head = new Uint8Array(await file.slice(0, 12).arrayBuffer());
+    const ext = extOf(file.name);
+    if (err.message !== 'media' || !(isHeifBytes(head) || ext === 'heic' || ext === 'heif')) throw err;
+    status.textContent = 'Fotoğraf hazırlanıyor…';
+    await loadLib('heic');
+    const jpeg = await HeicTo({ blob: file, type: 'image/jpeg', quality: 0.92 });
+    await showImage(jpeg, box, file.name);
+  }
+}
+function showImage(file, box, alt) {
   return new Promise((resolve, reject) => {
-    const img = el('img', { className: 'media', alt: file.name });
+    const img = el('img', { className: 'media', alt: alt || file.name });
     const wrap = el('div', { className: 'scroll-x' }, img);
     img.onload = () => {
       if (img.naturalWidth) setMeta(img.naturalWidth + '×' + img.naturalHeight);
@@ -537,19 +590,68 @@ async function slideImages(zip, slideName, xml) {
 async function renderZip(file, box) {
   await loadLib('jszip');
   const zip = await JSZip.loadAsync(await file.arrayBuffer());
-  const entries = Object.values(zip.files).filter((e) => !e.dir);
+  const entries = Object.values(zip.files).filter((e) => !e.dir).map((e) => ({
+    name: e.name,
+    size: e._data && e._data.uncompressedSize,
+    read: () => e.async('blob'),
+  }));
+  showFileList(entries, box);
+}
+let archiveModule;
+async function loadArchive() {
+  if (!archiveModule) {
+    try {
+      archiveModule = await import('./vendor/libarchive/libarchive.js');
+    } catch (e) {
+      throw new LibError(location.protocol === 'file:'
+        ? 'Bu arşivler bilgisayardaki dosyadan açılamıyor. Sayfayı internet adresinden açıp yeniden dene.'
+        : undefined);
+    }
+    archiveModule.Archive.init({ workerUrl: new URL('vendor/libarchive/worker-bundle.js', location.href) });
+  }
+  return archiveModule.Archive;
+}
+async function renderArchive(file, box) {
+  const Archive = await loadArchive();
+  const archive = await Archive.open(file);
+  cleanups.push(() => archive.close());
+  if (await archive.hasEncryptedData()) throw new Error('encrypted');
+  const items = await archive.getFilesArray();
+  if (!items.length) throw new Error('archive');
+  showFileList(items.map(({ file: f, path }) => ({
+    name: (path || '') + f.name,
+    size: f.size,
+    read: () => f.extract(),
+  })), box);
+}
+async function renderGzip(file, box, status) {
+  if (typeof DecompressionStream === 'undefined') throw new Error('gzip');
+  const reader = file.stream().pipeThrough(new DecompressionStream('gzip')).getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > MAX_GUNZIP_BYTES) { await reader.cancel(); throw new Error('gzip'); }
+    chunks.push(value);
+  }
+  const inner = new File(chunks, file.name.replace(/\.gz$/i, '') || 'dosya');
+  box.append(el('div', { className: 'note', textContent: 'Sıkıştırılmış dosyanın içeriği gösteriliyor (' + formatSize(total) + ').' }));
+  await render(inner, box, status);
+}
+function showFileList(entries, box) {
   setMeta(entries.length + ' dosya');
   box.append(el('div', { className: 'note', textContent: 'Açmak istediğin dosyaya dokun.' }));
   const list = el('ul', { className: 'files' });
   entries.sort((a, b) => a.name.localeCompare(b.name, 'tr')).forEach((entry) => {
-    const size = entry._data && entry._data.uncompressedSize;
     const button = el('button', { type: 'button' },
       el('span', { textContent: entry.name }),
-      el('span', { className: 'size', textContent: formatSize(size) }));
+      el('span', { className: 'size', textContent: formatSize(entry.size) }));
     button.onclick = async () => {
       button.disabled = true;
       try {
-        const blob = await entry.async('blob');
+        const blob = await entry.read();
         openFile(new File([blob], entry.name.split('/').pop()), true);
       } catch (e) {
         console.error(e);
@@ -560,6 +662,167 @@ async function renderZip(file, box) {
     list.append(el('li', null, button));
   });
   box.append(list);
+}
+async function renderEpub(file, box) {
+  await loadLib('jszip');
+  await loadLib('epub');
+  const book = ePub(await file.arrayBuffer());
+  cleanups.push(() => book.destroy());
+  // Bozuk dosyada epub.js bazen hiç sonuçlanmıyor, sonsuza dek beklemeyelim.
+  await Promise.race([
+    book.ready,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('epub')), 30000)),
+  ]);
+  const title = book.packaging && book.packaging.metadata && book.packaging.metadata.title;
+  setMeta(title || '');
+
+  const frame = el('div', { className: 'epub' });
+  const prev = el('button', { className: 'btn', type: 'button', textContent: '←', ariaLabel: 'Önceki sayfa' });
+  const next = el('button', { className: 'btn', type: 'button', textContent: '→', ariaLabel: 'Sonraki sayfa' });
+  const toc = el('select', { ariaLabel: 'Bölümler' });
+  const addToc = (items, depth) => items.forEach((item) => {
+    toc.append(el('option', { value: item.href, textContent: '  '.repeat(depth) + item.label.trim() }));
+    if (item.subitems) addToc(item.subitems, depth + 1);
+  });
+  addToc(book.navigation ? book.navigation.toc : [], 0);
+  box.append(frame, el('div', { className: 'epub-nav' }, prev, toc, next));
+  if (!toc.options.length) toc.hidden = true;
+
+  // allowScriptedContent kapalı: kitabın içindeki kodlar çalışmaz.
+  const rendition = book.renderTo(frame, { width: '100%', height: '100%', spread: 'none', flow: 'paginated', allowScriptedContent: false });
+  await rendition.display();
+  prev.onclick = () => rendition.prev();
+  next.onclick = () => rendition.next();
+  toc.onchange = () => rendition.display(toc.value);
+  rendition.on('relocated', (where) => {
+    const href = where.start.href;
+    const match = [...toc.options].find((o) => o.value.split('#')[0] === href);
+    if (match) toc.value = match.value;
+  });
+  const onKey = (e) => {
+    if (e.key === 'ArrowLeft') rendition.prev();
+    if (e.key === 'ArrowRight') rendition.next();
+  };
+  rendition.on('keydown', onKey);
+  window.addEventListener('keydown', onKey);
+  cleanups.push(() => window.removeEventListener('keydown', onKey));
+  let startX = null;
+  rendition.on('touchstart', (e) => { startX = e.changedTouches[0].screenX; });
+  rendition.on('touchend', (e) => {
+    if (startX === null) return;
+    const dx = e.changedTouches[0].screenX - startX;
+    if (dx < -50) rendition.next();
+    if (dx > 50) rendition.prev();
+    startX = null;
+  });
+}
+async function renderRtf(file, box) {
+  await loadLib('emf');
+  await loadLib('wmf');
+  await loadLib('rtf');
+  RTFJS.loggingEnabled(false);
+  WMFJS.loggingEnabled(false);
+  EMFJS.loggingEnabled(false);
+  const nodes = await new RTFJS.Document(await file.arrayBuffer()).render();
+  const paper = el('div', { className: 'paper light' });
+  paper.innerHTML = await sanitize(nodes.map((n) => n.outerHTML).join(''));
+  // Kütüphane bozuk dosyada hata vermeden boş sonuç dönebiliyor.
+  if (!paper.textContent.trim() && !paper.querySelector('img, svg')) throw new Error('rtf');
+  box.append(paper);
+}
+async function renderOdt(file, box) {
+  await loadLib('jszip');
+  const zip = await JSZip.loadAsync(await file.arrayBuffer());
+  const parser = new DOMParser();
+  const content = zip.files['content.xml'];
+  if (!content) throw new Error('odt');
+  const xml = parser.parseFromString(await content.async('string'), 'application/xml');
+  const body = xml.getElementsByTagName('office:text')[0];
+  if (!body) throw new Error('odt');
+
+  const styles = {};
+  const readStyles = (doc) => {
+    for (const style of doc.getElementsByTagName('style:style')) {
+      const props = style.getElementsByTagName('style:text-properties')[0];
+      if (props) styles[style.getAttribute('style:name')] = props;
+    }
+  };
+  if (zip.files['styles.xml']) readStyles(parser.parseFromString(await zip.files['styles.xml'].async('string'), 'application/xml'));
+  readStyles(xml);
+
+  const applyStyle = (node, source) => {
+    const props = styles[source.getAttribute('text:style-name')];
+    if (!props) return;
+    if (props.getAttribute('fo:font-weight') === 'bold') node.style.fontWeight = '700';
+    if (props.getAttribute('fo:font-style') === 'italic') node.style.fontStyle = 'italic';
+    const under = props.getAttribute('style:text-underline-style');
+    if (under && under !== 'none') node.style.textDecoration = 'underline';
+  };
+  const kids = (node) => [...node.childNodes].flatMap(convert);
+  function convert(node) {
+    if (node.nodeType === Node.TEXT_NODE) return [node.nodeValue];
+    if (node.nodeType !== Node.ELEMENT_NODE) return [];
+    const wrap = (tag, props) => { const out = el(tag, props, ...kids(node)); return [out]; };
+    switch (node.nodeName) {
+      case 'text:p': {
+        const p = wrap('p')[0];
+        applyStyle(p, node);
+        if (!p.childNodes.length) p.append(el('br'));
+        return [p];
+      }
+      case 'text:h': {
+        const level = Math.min(Math.max(Number(node.getAttribute('text:outline-level')) || 1, 1), 6);
+        return wrap('h' + level);
+      }
+      case 'text:span': {
+        const span = wrap('span')[0];
+        applyStyle(span, node);
+        return [span];
+      }
+      case 'text:a': {
+        const href = node.getAttribute('xlink:href') || '';
+        if (!/^(https?:|mailto:)/i.test(href)) return kids(node);
+        return wrap('a', { href, target: '_blank', rel: 'noopener noreferrer' });
+      }
+      case 'text:s': return [' '.repeat(Number(node.getAttribute('text:c')) || 1)];
+      case 'text:tab': return ['    '];
+      case 'text:line-break': return [el('br')];
+      case 'text:list': return wrap('ul');
+      case 'text:list-item': return wrap('li');
+      case 'table:table': return wrap('table');
+      case 'table:table-row': return wrap('tr');
+      case 'table:table-cell': {
+        const td = wrap('td')[0];
+        td.colSpan = Number(node.getAttribute('table:number-columns-spanned')) || 1;
+        td.rowSpan = Number(node.getAttribute('table:number-rows-spanned')) || 1;
+        return [td];
+      }
+      case 'draw:image': {
+        const entry = zip.files[(node.getAttribute('xlink:href') || '').replace(/^\.\//, '')];
+        if (!entry || !/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(entry.name)) return [];
+        const img = el('img', { alt: '' });
+        const type = /\.svg$/i.test(entry.name) ? { type: 'image/svg+xml' } : undefined;
+        entry.async('blob').then((blob) => { img.src = objectUrl(new Blob([blob], type)); }).catch(() => img.remove());
+        return [img];
+      }
+      case 'text:note-citation':
+      case 'table:covered-table-cell':
+      case 'table:table-column':
+      case 'text:table-of-content-source':
+      case 'text:tracked-changes':
+      case 'text:sequence-decls':
+      case 'office:forms':
+      case 'office:annotation':
+      case 'draw:object':
+      case 'svg:title':
+      case 'svg:desc':
+        return [];
+      default:
+        return kids(node);
+    }
+  }
+  box.append(el('div', { className: 'note', textContent: 'Belgenin içeriği gösteriliyor; sayfa düzeni orijinalinden farklı olabilir.' }),
+    el('article', { className: 'paper light' }, ...kids(body)));
 }
 async function readTextPart(file) {
   const cut = file.size > MAX_TEXT_BYTES;
